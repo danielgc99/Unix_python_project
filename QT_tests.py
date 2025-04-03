@@ -33,9 +33,12 @@ def euclidean_dist(pointA, pointB):
     distance = math.sqrt(square_sum)
     return distance
 
+distance_matrix = {}
 for i in range(len(point_data)):
-    for x in range(i + 1, len(point_data)):
-        dist = euclidean_dist(point_data[i], point_data[x])
-        print(f"Distance between {point_data[i][0]} and {point_data[x][0]}: {dist}")
+    for j in range(i + 1, len(point_data)):
+        dist = euclidean_dist(point_data[i], point_data[j])
+        distance_matrix[(i, j)] = dist
+
+print(distance_matrix)
     
 
