@@ -50,7 +50,7 @@ max_distance = max(distance_matrix.values())
 quality_threshold = 0.3 * max_distance
 print(f"Quality Threshold (30% of diameter): {quality_threshold}")
 
-def candidate_cluster(center_idx, point_data, distance_matrix, used_set):
+def candidate_cluster(center_idx, point_data, distance_matrix, threshold, used_set):
     """
     Forms a candidate cluster starting from center_idx.
     Only includes points that are not in used_set.
@@ -72,6 +72,28 @@ def candidate_cluster(center_idx, point_data, distance_matrix, used_set):
     
     # Sort potential neighbor by distance (closest first)
     distance_to_center.sort(key = lambda x: x[1])
+
+    # Try adding each neighbor
+    for idx, _ in distance_to_center:
+        # Tentatively add the point
+        trial_cluster = cluster + [idx]
+
+        # Check all pairwise distances in trial_cluster
+        max_dist = 0
+        for i in range(len(trial_cluster)):
+            for j in range(i + 1, len(trial_cluster)):
+                a, b = trial_cluster[i], trial_cluster[j]
+                key = (a,b) if a < b else (b, a)
+                d = distance_matrix[key]
+                if d > max_dist:
+                    max_dist = d
+
+        # If the max distance is within the threshold, accept the new point
+        if max_dist <= threshold:
+            cluster.append(idx)
+        #If not, skip it
+
+    return cluster
 
     
 
