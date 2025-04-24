@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+##Libraries
+import sys
+
+infile = sys.argv[1]
+
+##Functions
+#loading data
+def readpoints(infile):
+    point_list = []
+    with open(infile) as file:
+        for line in file:
+            line = line.strip().split()
+            point_list.append((line[0],[float(n) for n in line[1:]]))
+    
+    return(point_list)
+
+point_data = readpoints(infile)
 
 import math
 
@@ -16,6 +33,45 @@ def euclidean_dist(pointA, pointB):
     distance = math.sqrt(square_sum)
     return distance
 
+# Calculate the distance between each point
+distance_matrix = {}
+for i in range(len(point_data)):
+    for j in range(i + 1, len(point_data)):
+        dist = euclidean_dist(point_data[i], point_data[j])
+        distance_matrix[(i, j)] = dist
+
+# Print the distance
+print(distance_matrix)
+
+# Calculate the distance between the two points that are ruthest away from each other
+max_distance = max(distance_matrix.values())
+
+# Measure QT as 30% of the maximum distance
+quality_threshold = 0.3 * max_distance
+print(f"Quality Threshold (30% of diameter): {quality_threshold}")
+
+def candidate_cluster(center_idx, point_data, distance_matrix, used_set):
+    """
+    Forms a candidate cluster starting from center_idx.
+    Only includes points that are not in used_set.
+    Keeps adding points while the cluster's diameter remains within threshold.
+    """
+
+    # Start with the center point
+    cluster = [center_idx]
+
+    # Make a list of potential neighbours with their distance to the center point
+    distance_to_center = []
+    for i in range(len(point_data)):
+        # Try each point that is not the center point or an already used point in another cluster
+        if i != center_idx and i not in used_set:
+            # Get the distance from centre_idx to i
+            key = (center_idx, i) if center_idx < i else (i, center_idx)
+            dist = distance_matrix[key]
+            distance_to_center.append((i, dist))
+    
+    # Sort potential neighbor by distance (closest first)
+    distance_to_center.sort(key = lambda x: x[1])
 
     
 
