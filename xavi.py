@@ -95,5 +95,43 @@ def candidate_cluster(center_idx, point_data, distance_matrix, threshold, used_s
 
     return cluster
 
+
+def best_cluster(point_data, distance_matrix, threshold, used_set):
+    """
+    Tries to form a cluster from each unused point.
+    Returns the best cluster found: the one with the most points (and tightest if tied).
+    """
+
+    best_cluster = []
+    best_diameter = float("inf")    
+
+    # Try to form a candidate cluster from every unused point
+    for i in range(len(point_data)):
+        if i in used_set:
+            continue # Skip if point has already been used
+        
+        # Form a candidate cluster starting from point i
+        cluster = candidate_cluster(i, point_data, distance_matrix, threshold, used_set)
+
+        # Only consider clusters that have more than 1 point
+        if len(cluster) < 2:
+            continue
+
+        # Compute the diameter of this cluster 
+        max_dist = 0
+        for a in range(len(cluster)):
+            for b in range(a + 1, len(cluster)):
+                p1, p2 = cluster[a], cluster[b]
+                key = (p1, p2) if p1 < p2 else (p2, p1)
+                d = distance_matrix[key]
+                if d > max_dist:
+                    max_dist = d # Track the largest distance in the cluster
+
+        # Compare this cluster with the current best one
+        if (len(cluster) > len(best_cluster)) or (len(cluster) == len(best_cluster) and max_dist < best_diameter):
+            best_cluster = cluster
+            best_diameter = max_dist
+        
+        return best_cluster
     
 
