@@ -2,7 +2,11 @@
 ##Libraries
 import sys
 
-infile = sys.argv[1]
+print(len(sys.argv))
+if len(sys.argv) == 2:
+    infile = sys.argv[1]
+else:
+    infile = "data/point1000.lst"
 
 ##Functions
 #loading data
@@ -15,6 +19,7 @@ def readpoints(infile):
     
     return(point_list)
 
+print(readpoints(infile))
 point_data = readpoints(infile)
 
 import math
@@ -39,6 +44,6 @@ for i in range(len(point_data)):
         dist = euclidean_dist(point_data[i], point_data[j])
         distance_matrix[(i, j)] = dist
 
-print(distance_matrix)
+#print(distance_matrix)
     
 
