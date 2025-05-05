@@ -36,17 +36,22 @@ def euclidean_dist(pointA, pointB):
 def create_filtered_distance_matrix(point_data, quality_threshold):
     """
     Calculate distances between all points and filter out pairs that exceed
-    the quality threshold.
+    the quality threshold. Also identify closest point pairs to merge as a pre-clustering step.
     
     Returns:
     - distance_matrix: Dictionary with only distances <= quality_threshold
     - point_neighbors: Dictionary mapping each point to its potential neighbors
+    - point_pairs: Dictionary mapping representative point indices to their paired points
+    - merged_to_rep: Dictionary mapping merged points to their representative point
     """
     print("Creating filtered distance matrix...")
     start_time = time.time()
     
     distance_matrix = {}
     point_neighbors = {i: set() for i in range(len(point_data))}
+    
+    # Track closest neighbors for each point
+    closest_neighbor = {}  # Maps point index to (neighbor_index, distance)
     
     total_pairs = len(point_data) * (len(point_data) - 1) // 2
     included_pairs = 0
@@ -55,7 +60,7 @@ def create_filtered_distance_matrix(point_data, quality_threshold):
         if i % 100 == 0 and i > 0:
             progress = (i * (len(point_data) - 1) - (i * (i - 1) // 2)) / total_pairs * 100
             print(f"Processing point {i}/{len(point_data)} ({progress:.1f}% complete)")
-            
+        
         for j in range(i + 1, len(point_data)):
             dist = euclidean_dist(point_data[i], point_data[j])
             
@@ -66,39 +71,114 @@ def create_filtered_distance_matrix(point_data, quality_threshold):
                 point_neighbors[i].add(j)
                 point_neighbors[j].add(i)
                 included_pairs += 1
+                
+                # Track closest neighbor for each point
+                if i not in closest_neighbor or dist < closest_neighbor[i][1]:
+                    closest_neighbor[i] = (j, dist)
+                if j not in closest_neighbor or dist < closest_neighbor[j][1]:
+                    closest_neighbor[j] = (i, dist)
+    
+    # Identify mutually closest pairs (bidirectional closest neighbors)
+    mutual_closest_pairs = []
+    used_points = set()
+    
+    # First pass: find mutual closest pairs
+    for i in range(len(point_data)):
+        if i in used_points or i not in closest_neighbor:
+            continue
+            
+        neighbor, _ = closest_neighbor[i]
+        
+        # Check if this is a mutual closest relationship
+        if neighbor in closest_neighbor and closest_neighbor[neighbor][0] == i:
+            mutual_closest_pairs.append((i, neighbor))
+            used_points.add(i)
+            used_points.add(neighbor)
+    
+    # Create point_pairs mapping and merged_to_rep mapping
+    point_pairs = {}  # Map representative point to its paired point
+    merged_to_rep = {}  # Map merged point to its representative
+    
+    for i, j in mutual_closest_pairs:
+        # Always use the smaller index as the representative for consistency
+        rep_idx = min(i, j)
+        merged_idx = max(i, j)
+        
+        # Store the pairing
+        point_pairs[rep_idx] = merged_idx
+        merged_to_rep[merged_idx] = rep_idx
+        
+        # Update the neighbor sets for the representative point
+        # Union of neighbors excluding the points being merged
+        rep_neighbors = (point_neighbors[i] | point_neighbors[j]) - {i, j}
+        point_neighbors[rep_idx] = rep_neighbors
+        
+        # Remove the merged point's neighbors
+        point_neighbors.pop(merged_idx, None)
+        
+        # Update the neighbors of other points
+        for neighbor in rep_neighbors:
+            # Ensure neighbor has rep_idx in its neighbor set
+            point_neighbors[neighbor].add(rep_idx)
+            
+            # Remove the merged point from the neighbor's set
+            if merged_idx in point_neighbors[neighbor]:
+                point_neighbors[neighbor].remove(merged_idx)
+        
+        # Update distance matrix with distances for the representative point
+        for neighbor in rep_neighbors:
+            if neighbor == merged_idx:
+                continue  # Skip the merged point itself
+                
+            # Use the maximum distance as the conservative estimate
+            dist_i_neighbor = distance_matrix.get((min(i, neighbor), max(i, neighbor)), float('inf'))
+            dist_j_neighbor = distance_matrix.get((min(j, neighbor), max(j, neighbor)), float('inf'))
+            rep_dist = max(dist_i_neighbor, dist_j_neighbor)
+            
+            # Set the distance using the representative point
+            distance_matrix[(min(rep_idx, neighbor), max(rep_idx, neighbor))] = rep_dist
+    
+    # Cleanup: Remove entries with merged points from the distance matrix
+    filtered_distance_matrix = {}
+    for (a, b), dist in distance_matrix.items():
+        # Skip if either point has been merged
+        if a in merged_to_rep or b in merged_to_rep:
+            continue
+        filtered_distance_matrix[(a, b)] = dist
     
     elapsed_time = time.time() - start_time
     print(f"Filtered distance matrix created in {elapsed_time:.2f} seconds")
     print(f"Total pairs considered: {total_pairs}")
-    print(f"Pairs included in filtered matrix: {included_pairs} ({included_pairs/total_pairs*100:.2f}%)")
-    print(f"Reduction: {100 * (1 - included_pairs / total_pairs):.2f}%")
+    print(f"Original pairs included: {included_pairs} ({included_pairs/total_pairs*100:.2f}%)")
+    print(f"Reduction from filtering: {100 * (1 - included_pairs / total_pairs):.2f}%")
+    print(f"Further reduction from merging {len(mutual_closest_pairs)} mutual closest point pairs")
+    print(f"Total points after merging: {len(point_data) - len(mutual_closest_pairs)}")
     
-    return distance_matrix, point_neighbors
+    return filtered_distance_matrix, point_neighbors, point_pairs, merged_to_rep
 
-def generate_all_candidate_clusters(point_data, distance_matrix, threshold, point_neighbors, max_points_per_cluster=None):
+def generate_all_candidate_clusters(point_data, distance_matrix, threshold, point_neighbors, point_pairs, merged_to_rep, max_points_per_cluster=None):
     """
     Generates all possible candidate clusters for every point as a center.
-    Returns a list of lists where each inner list contains the indices of points in a cluster.
-    The first point in each inner list is always the center point.
-    
-    Uses the neighbor information to speed up the process.
+    Skips points that have been merged as part of point pairs.
     """
     print("Generating all candidate clusters...")
     start_time = time.time()
     
     all_candidates = []
-    total_centers = len(point_data)
+    # Only consider non-merged points as centers
+    valid_centers = [i for i in range(len(point_data)) if i not in merged_to_rep]
+    total_centers = len(valid_centers)
     
-    # For each potential center point
-    for center_idx in range(total_centers):
-        if center_idx % 100 == 0 and center_idx > 0:
+    # For each potential center point (excluding merged points)
+    for i, center_idx in enumerate(valid_centers):
+        if i % 100 == 0 and i > 0:
             elapsed = time.time() - start_time
-            remaining = (elapsed / center_idx) * (total_centers - center_idx)
-            print(f"Processing center {center_idx}/{total_centers} ({center_idx/total_centers*100:.1f}%), " +
+            remaining = (elapsed / i) * (total_centers - i)
+            print(f"Processing center {i+1}/{total_centers} ({(i+1)/total_centers*100:.1f}%), " +
                   f"elapsed: {elapsed:.2f}s, est. remaining: {remaining:.2f}s")
         
         # Skip points with no neighbors
-        if len(point_neighbors[center_idx]) == 0:
+        if center_idx not in point_neighbors or len(point_neighbors[center_idx]) == 0:
             all_candidates.append([center_idx])  # Single-point cluster
             continue
         
@@ -122,8 +202,6 @@ def generate_all_candidate_clusters(point_data, distance_matrix, threshold, poin
                 # Check if this point is a neighbor of all points in the current cluster
                 valid_point = True
                 
-                # We only need to check against existing cluster points
-                # (we already know it's a neighbor of the center)
                 for existing_idx in cluster:
                     if existing_idx == center_idx:
                         continue  # Skip the center, we already checked this
@@ -231,20 +309,23 @@ def find_best_cluster(candidate_clusters, distance_matrix):
     
     return best_cluster
 
-def update_candidate_clusters(candidate_clusters, best_cluster, distance_matrix, threshold, used_points, point_neighbors):
+def update_candidate_clusters(candidate_clusters, best_cluster, distance_matrix, threshold, used_points, point_neighbors, point_pairs, merged_to_rep):
     """
-    Updates the list of candidate clusters by:
-    1. Removing the best cluster itself
-    2. Removing clusters whose center point is in the best cluster
-    3. Regenerating clusters for center points that are not in the best cluster
-    
-    Optimized to only consider neighboring points.
+    Updates the list of candidate clusters after removing the best cluster.
+    Regenerates clusters for centers that are not in the best cluster.
     """
     # Create a set of points that are in the best cluster for faster lookups
     best_cluster_points = set(best_cluster)
     
+    # Expand best cluster to include paired points
+    expanded_best_cluster = set(best_cluster)
+    for point in best_cluster:
+        # If this point is a representative for a pair, add the paired point
+        if point in point_pairs:
+            expanded_best_cluster.add(point_pairs[point])
+    
     # Add best cluster points to the overall used points set
-    used_points.update(best_cluster_points)
+    used_points.update(expanded_best_cluster)
     
     # Create a list to store updated candidate clusters
     updated_candidates = []
@@ -253,8 +334,8 @@ def update_candidate_clusters(candidate_clusters, best_cluster, distance_matrix,
     for cluster in candidate_clusters:
         center_point = cluster[0]
         
-        # Skip this cluster if its center is in the best cluster
-        if center_point in best_cluster_points:
+        # Skip this cluster if its center is in the best cluster or is a merged point
+        if center_point in expanded_best_cluster or center_point in merged_to_rep:
             continue
         
         # Check if this center point is still available
@@ -263,7 +344,8 @@ def update_candidate_clusters(candidate_clusters, best_cluster, distance_matrix,
             new_cluster = [center_point]
             
             # Get available neighbor points (not used and neighbors of center)
-            available_neighbors = [p for p in point_neighbors[center_point] if p not in used_points]
+            available_neighbors = [p for p in point_neighbors[center_point] 
+                                 if p not in used_points and p not in merged_to_rep]
             
             # Continue adding points as long as possible
             while available_neighbors:
@@ -320,13 +402,27 @@ def update_candidate_clusters(candidate_clusters, best_cluster, distance_matrix,
     
     return updated_candidates
 
-def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighbors, max_points_per_cluster=None):
+def expand_cluster_with_pairs(cluster, point_pairs):
+    """
+    Expands a cluster by adding paired points for any representatives in the cluster.
+    """
+    expanded = set(cluster)
+    
+    # Add paired points for any representatives
+    for idx in cluster:
+        if idx in point_pairs:
+            expanded.add(point_pairs[idx])
+    
+    return list(expanded)
+
+def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighbors, point_pairs, merged_to_rep, max_points_per_cluster=None):
     """
     Optimized QT clustering algorithm that:
     1. Uses a filtered distance matrix with only points within threshold
     2. Keeps track of neighboring points for each point
-    3. Only considers valid neighbors when building clusters
-    4. Has an optional limit on cluster size
+    3. Pre-merges closest point pairs to reduce computation
+    4. Only considers valid neighbors when building clusters
+    5. Has an optional limit on cluster size
     """
     print("Starting optimized QT clustering algorithm...")
     # Generate all possible candidate clusters
@@ -335,6 +431,8 @@ def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighb
         distance_matrix, 
         threshold,
         point_neighbors,
+        point_pairs,
+        merged_to_rep,
         max_points_per_cluster
     )
     
@@ -344,11 +442,16 @@ def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighb
     iteration = 0
     
     # Continue until all points are used or no more valid clusters can be formed
-    while candidate_clusters and len(used_points) < len(point_data):
+    total_points = len(point_data)
+    effective_point_count = total_points - len(merged_to_rep)  # Adjust for merged points
+    
+    print(f"Effective point count after merging: {effective_point_count}")
+    
+    while candidate_clusters and len(used_points) < effective_point_count:
         iteration += 1
         iter_start = time.time()
         print(f"\nIteration {iteration}:")
-        print(f"- Points used so far: {len(used_points)}/{len(point_data)}")
+        print(f"- Points used so far: {len(used_points)}/{effective_point_count}")
         print(f"- Candidate clusters remaining: {len(candidate_clusters)}")
         
         # Find the best cluster
@@ -358,15 +461,18 @@ def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighb
             print("- No valid cluster found, breaking...")
             break
             
+        # Expand the best cluster to include paired points
+        expanded_best = expand_cluster_with_pairs(best, point_pairs)
+        
         # Add this cluster to final results
-        final_clusters.append(best)
+        final_clusters.append(expanded_best)
         
         # Print some details about the selected cluster
-        if len(best) <= 10:  # Only print all points for small clusters
-            print(f"- Selected best cluster with {len(best)} points: {[point_data[idx][0] for idx in best]}")
+        if len(expanded_best) <= 10:  # Only print all points for small clusters
+            print(f"- Selected best cluster with {len(expanded_best)} points: {[point_data[idx][0] for idx in expanded_best]}")
         else:
-            first_three = [point_data[idx][0] for idx in best[:3]]
-            print(f"- Selected best cluster with {len(best)} points: {first_three}... and {len(best)-3} more")
+            first_three = [point_data[idx][0] for idx in expanded_best[:3]]
+            print(f"- Selected best cluster with {len(expanded_best)} points: {first_three}... and {len(expanded_best)-3} more")
         
         # Store current used points count
         prev_used_count = len(used_points)
@@ -378,7 +484,9 @@ def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighb
             distance_matrix,
             threshold,
             used_points,
-            point_neighbors
+            point_neighbors,
+            point_pairs,
+            merged_to_rep
         )
         
         print(f"- Added {len(used_points) - prev_used_count} new points to used points")
@@ -386,7 +494,10 @@ def optimized_qt_clustering(point_data, distance_matrix, threshold, point_neighb
         print(f"- Iteration completed in {time.time() - iter_start:.2f} seconds")
     
     # Add any remaining points as single-point clusters
-    remaining_points = [i for i in range(len(point_data)) if i not in used_points]
+    # Only consider original points, not merged ones
+    remaining_points = [i for i in range(len(point_data)) 
+                      if i not in used_points and i not in merged_to_rep]
+    
     if remaining_points:
         print(f"\nAdding {len(remaining_points)} remaining points as single-point clusters")
         for i in remaining_points:
@@ -402,7 +513,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2:
         infile = sys.argv[1]
     else:
-        infile = "data/point100.lst"
+        infile = "data/point1000.lst"
     
     # Get max_points_per_cluster from command line if provided
     max_points_per_cluster = None
@@ -441,8 +552,8 @@ if __name__ == "__main__":
     print(f"Maximum distance: {max_distance}")
     print(f"Quality Threshold (30% of diameter): {quality_threshold}")
     
-    # Create filtered distance matrix that only contains distances <= threshold
-    distance_matrix, point_neighbors = create_filtered_distance_matrix(
+    # Create filtered distance matrix with pre-merged point pairs
+    distance_matrix, point_neighbors, point_pairs, merged_to_rep = create_filtered_distance_matrix(
         point_data, quality_threshold
     )
     
@@ -456,6 +567,8 @@ if __name__ == "__main__":
         distance_matrix, 
         quality_threshold,
         point_neighbors,
+        point_pairs,
+        merged_to_rep,
         max_points_per_cluster
     )
     clustering_time = time.time() - clustering_start_time
