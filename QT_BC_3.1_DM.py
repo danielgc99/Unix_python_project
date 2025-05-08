@@ -401,7 +401,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     if len(sys.argv) >= 2:
         infile = sys.argv[1]
-    else:
+    else:  
         infile = "data/point100.lst"
     
     # Get max_points_per_cluster from command line if provided
