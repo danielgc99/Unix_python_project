@@ -1,6 +1,7 @@
 import math
 import sys
 import time
+from collections import defaultdict
 
 def readpoints(infile):
     point_list = []
@@ -117,16 +118,19 @@ def create_filtered_distance_matrix(point_data, quality_threshold):
     
     return distance_matrix, point_neighbors, closest_pairs
 
-def generate_all_candidate_clusters_with_diameter_cache(point_data, distance_matrix, threshold, point_neighbors, closest_pairs, max_points_per_cluster=None):
+def generate_all_candidate_clusters_with_common_centers(point_data, distance_matrix, threshold, point_neighbors, closest_pairs, max_points_per_cluster=None):
     """
     Generates all possible candidate clusters for every point as a center.
     Skips points that are the second element in a mutual closest pair.
     Uses a diameter cache to optimize diameter calculations.
+    Identifies common centers that would form identical clusters.
     
-    Returns a list of lists where each inner list contains the indices of points in a cluster.
-    The first point in each inner list is always the center point.
+    Returns:
+    - all_candidates: A list of lists where each inner list contains the indices of points in a cluster
+    - common_centers_map: A dictionary mapping each point to its common center group ID
+    - center_to_cluster_map: A dictionary mapping center point index to its corresponding cluster index
     """
-    print("Generating all candidate clusters with diameter cache optimization...")
+    print("Generating all candidate clusters with common centers optimization...")
     start_time = time.time()
     
     all_candidates = []
@@ -143,6 +147,10 @@ def generate_all_candidate_clusters_with_diameter_cache(point_data, distance_mat
     
     skipped_points = 0
     
+    # For cluster-to-common-centers mapping
+    cluster_hash_to_centers = defaultdict(list)
+    center_to_cluster_map = {}  # Maps center point index to its cluster index in all_candidates
+    
     # For each potential center point
     for center_idx in range(total_centers):
         if center_idx in skip_points:
@@ -157,7 +165,10 @@ def generate_all_candidate_clusters_with_diameter_cache(point_data, distance_mat
         
         # Skip points with no neighbors
         if len(point_neighbors[center_idx]) == 0:
+            cluster_idx = len(all_candidates)
             all_candidates.append([center_idx])  # Single-point cluster
+            center_to_cluster_map[center_idx] = cluster_idx
+            cluster_hash_to_centers[tuple([center_idx])].append(center_idx)
             continue
         
         # Start with the center point
@@ -232,9 +243,24 @@ def generate_all_candidate_clusters_with_diameter_cache(point_data, distance_mat
             else:
                 # If no point can be added without exceeding threshold, we're done
                 break
-                
+        
+        # Sort the cluster (except the center) to create a consistent hash
+        sorted_cluster = [center_idx] + sorted(cluster[1:])
+        cluster_hash = tuple(sorted_cluster)  # Convert to tuple for hashing
+        
+        # Add this center to the appropriate common centers group
+        cluster_hash_to_centers[cluster_hash].append(center_idx)
+        
         # Add this candidate cluster to our list of all candidates
-        all_candidates.append(cluster)
+        cluster_idx = len(all_candidates)
+        all_candidates.append(sorted_cluster)
+        center_to_cluster_map[center_idx] = cluster_idx
+    
+    # Create a mapping from center point to its common center group ID
+    common_centers_map = {}
+    for group_id, (cluster_hash, centers) in enumerate(cluster_hash_to_centers.items()):
+        for center in centers:
+            common_centers_map[center] = group_id
     
     elapsed_time = time.time() - start_time
     
@@ -244,12 +270,18 @@ def generate_all_candidate_clusters_with_diameter_cache(point_data, distance_mat
     max_cluster_size = max(cluster_sizes)
     clusters_with_multiple_points = sum(1 for c in all_candidates if len(c) > 1)
     
+    # Count common center groups
+    unique_common_center_groups = len(cluster_hash_to_centers)
+    avg_centers_per_group = sum(len(centers) for centers in cluster_hash_to_centers.values()) / unique_common_center_groups
+    
     print(f"Generated {len(all_candidates)} candidate clusters in {elapsed_time:.2f} seconds")
     print(f"Skipped {skipped_points} centers (second elements in closest pairs)")
     print(f"Clusters with multiple points: {clusters_with_multiple_points} ({clusters_with_multiple_points/len(all_candidates)*100:.2f}%)")
     print(f"Average cluster size: {avg_cluster_size:.2f}, Maximum: {max_cluster_size}")
+    print(f"Found {unique_common_center_groups} unique common center groups")
+    print(f"Average centers per group: {avg_centers_per_group:.2f}")
     
-    return all_candidates
+    return all_candidates, common_centers_map, center_to_cluster_map
 
 def find_best_cluster(candidate_clusters, distance_matrix):
     """
@@ -290,13 +322,15 @@ def find_best_cluster(candidate_clusters, distance_matrix):
     
     return best_cluster
 
-def update_candidate_clusters_with_diameter_cache(candidate_clusters, best_cluster, distance_matrix, threshold, used_points, point_neighbors):
+def update_candidate_clusters_with_common_centers(candidate_clusters, best_cluster, distance_matrix, threshold, 
+                                                used_points, point_neighbors, common_centers_map, 
+                                                center_to_cluster_map, active_common_center_reps):
     """
-    Updates the list of candidate clusters using the diameter cache optimization.
+    Updates the list of candidate clusters using common centers optimization:
     
-    1. Removes the best cluster itself
-    2. Removing clusters whose center point is in the best cluster
-    3. Regenerating clusters for center points that are not in the best cluster
+    1. Updates which common center groups need recalculation
+    2. For each affected common center group, recalculates only one representative center
+    3. For unaffected common center groups, reuses the existing representative
     """
     # Create a set of points that are in the best cluster for faster lookups
     best_cluster_points = set(best_cluster)
@@ -304,85 +338,193 @@ def update_candidate_clusters_with_diameter_cache(candidate_clusters, best_clust
     # Add best cluster points to the overall used points set
     used_points.update(best_cluster_points)
     
+    # Identify which common center groups need recalculation
+    affected_groups = set()
+    for point in best_cluster_points:
+        if point in common_centers_map:  # The point is a center
+            affected_groups.add(common_centers_map[point])
+    
+    # Create a new active common center representatives dictionary
+    new_active_reps = {}
+    
     # Create a list to store updated candidate clusters
     updated_candidates = []
     
-    # For each original cluster
-    for cluster in candidate_clusters:
-        center_point = cluster[0]
-        
-        # Skip this cluster if its center is in the best cluster
-        if center_point in best_cluster_points:
+    # Process each active common center representative
+    for group_id, rep_center in active_common_center_reps.items():
+        # Skip if the group is affected by the best cluster selection
+        if group_id in affected_groups:
             continue
+            
+        # If the representative center is now used, find another from the same group
+        if rep_center in used_points:
+            continue
+            
+        # If the existing cluster is still valid, keep it
+        existing_cluster_idx = center_to_cluster_map.get(rep_center)
+        if existing_cluster_idx is not None and existing_cluster_idx < len(candidate_clusters):
+            existing_cluster = candidate_clusters[existing_cluster_idx]
+            # Check if the cluster is still valid (no points used)
+            if not any(p in used_points for p in existing_cluster):
+                updated_candidates.append(existing_cluster)
+                new_active_reps[group_id] = rep_center
+                continue
+    
+    # For affected groups, find new representatives and calculate new clusters
+    centers_to_recalculate = []
+    
+    # First pass: Find new representatives for affected groups
+    for center_idx in range(len(point_data)):
+        # Skip if the center is already used
+        if center_idx in used_points:
+            continue
+            
+        # Skip if the center doesn't belong to any common center group
+        if center_idx not in common_centers_map:
+            continue
+            
+        group_id = common_centers_map[center_idx]
         
-        # Check if this center point is still available
-        if center_point not in used_points:
-            # Start with the center point
-            new_cluster = [center_point]
+        # If the group needs recalculation or has no active representative yet
+        if group_id in affected_groups or group_id not in new_active_reps:
+            # If we haven't selected a representative for this group yet
+            if group_id not in new_active_reps:
+                new_active_reps[group_id] = center_idx
+                centers_to_recalculate.append(center_idx)
+    
+    # Calculate new clusters for centers that need recalculation
+    for center_idx in centers_to_recalculate:
+        # Start with the center point
+        new_cluster = [center_idx]
+        
+        # Get available neighbor points (not used and neighbors of center)
+        available_neighbors = [p for p in point_neighbors[center_idx] if p not in used_points]
+        
+        # Initialize diameter cache with distances to center
+        diameter_cache = {}
+        latest_added = center_idx
+        
+        for point_idx in available_neighbors:
+            diameter_cache[point_idx] = distance_matrix[center_idx][point_idx]
+        
+        # Continue adding points as long as possible
+        while available_neighbors:
+            best_point = None
+            best_diameter = float("inf")
             
-            # Get available neighbor points (not used and neighbors of center)
-            available_neighbors = [p for p in point_neighbors[center_point] if p not in used_points]
-            
-            # Initialize diameter cache with distances to center
-            diameter_cache = {}
-            latest_added = center_point
-            
+            # Try each available neighbor
             for point_idx in available_neighbors:
-                diameter_cache[point_idx] = distance_matrix[center_point][point_idx]
-            
-            # Continue adding points as long as possible
-            while available_neighbors:
-                best_point = None
-                best_diameter = float("inf")
+                # Use the cached diameter and only check against the latest added point
+                current_diameter = max(
+                    diameter_cache[point_idx],
+                    distance_matrix[latest_added][point_idx]
+                )
                 
-                # Try each available neighbor
+                # If this point keeps the cluster within threshold and has the smallest diameter
+                if current_diameter <= threshold and current_diameter < best_diameter:
+                    best_point = point_idx
+                    best_diameter = current_diameter
+            
+            # If we found a point to add, add it and update cache
+            if best_point is not None:
+                new_cluster.append(best_point)
+                latest_added = best_point
+                available_neighbors.remove(best_point)
+                
+                # Update the diameter cache for all remaining neighbors
                 for point_idx in available_neighbors:
-                    # Use the cached diameter and only check against the latest added point
-                    current_diameter = max(
+                    diameter_cache[point_idx] = max(
                         diameter_cache[point_idx],
                         distance_matrix[latest_added][point_idx]
                     )
-                    
-                    # If this point keeps the cluster within threshold and has the smallest diameter
-                    if current_diameter <= threshold and current_diameter < best_diameter:
-                        best_point = point_idx
-                        best_diameter = current_diameter
-                
-                # If we found a point to add, add it and update cache
-                if best_point is not None:
-                    new_cluster.append(best_point)
-                    latest_added = best_point
-                    available_neighbors.remove(best_point)
-                    
-                    # Update the diameter cache for all remaining neighbors
-                    for point_idx in available_neighbors:
-                        diameter_cache[point_idx] = max(
-                            diameter_cache[point_idx],
-                            distance_matrix[latest_added][point_idx]
-                        )
-                else:
-                    # If no point can be added without exceeding threshold, we're done
-                    break
+            else:
+                # If no point can be added without exceeding threshold, we're done
+                break
+        
+        # Only add if the new cluster has at least 2 points
+        if len(new_cluster) >= 2:
+            updated_candidates.append(new_cluster)
             
-            # Only add if the new cluster has at least 2 points
-            if len(new_cluster) >= 2:
-                updated_candidates.append(new_cluster)
+            # Update center_to_cluster_map for the new cluster
+            center_to_cluster_map[center_idx] = len(updated_candidates) - 1
     
-    return updated_candidates
+    # Add non-common centers that need calculation
+    for center_idx in range(len(point_data)):
+        # Skip if the center is already used
+        if center_idx in used_points:
+            continue
+            
+        # Skip if the center belongs to any common center group (already handled)
+        if center_idx in common_centers_map:
+            continue
+            
+        # Start with the center point
+        new_cluster = [center_idx]
+        
+        # Get available neighbor points (not used and neighbors of center)
+        available_neighbors = [p for p in point_neighbors[center_idx] if p not in used_points]
+        
+        # Initialize diameter cache with distances to center
+        diameter_cache = {}
+        latest_added = center_idx
+        
+        for point_idx in available_neighbors:
+            diameter_cache[point_idx] = distance_matrix[center_idx][point_idx]
+        
+        # Continue adding points as long as possible
+        while available_neighbors:
+            best_point = None
+            best_diameter = float("inf")
+            
+            # Try each available neighbor
+            for point_idx in available_neighbors:
+                # Use the cached diameter and only check against the latest added point
+                current_diameter = max(
+                    diameter_cache[point_idx],
+                    distance_matrix[latest_added][point_idx]
+                )
+                
+                # If this point keeps the cluster within threshold and has the smallest diameter
+                if current_diameter <= threshold and current_diameter < best_diameter:
+                    best_point = point_idx
+                    best_diameter = current_diameter
+            
+            # If we found a point to add, add it and update cache
+            if best_point is not None:
+                new_cluster.append(best_point)
+                latest_added = best_point
+                available_neighbors.remove(best_point)
+                
+                # Update the diameter cache for all remaining neighbors
+                for point_idx in available_neighbors:
+                    diameter_cache[point_idx] = max(
+                        diameter_cache[point_idx],
+                        distance_matrix[latest_added][point_idx]
+                    )
+            else:
+                # If no point can be added without exceeding threshold, we're done
+                break
+        
+        # Only add if the new cluster has at least 2 points
+        if len(new_cluster) >= 2:
+            updated_candidates.append(new_cluster)
+            
+            # Update center_to_cluster_map for the new cluster
+            center_to_cluster_map[center_idx] = len(updated_candidates) - 1
+    
+    return updated_candidates, new_active_reps
 
-def optimized_qt_clustering_with_diameter_cache(point_data, distance_matrix, threshold, point_neighbors, closest_pairs, max_points_per_cluster=None):
+def optimized_qt_clustering_with_common_centers(point_data, distance_matrix, threshold, point_neighbors, closest_pairs, max_points_per_cluster=None):
     """
-    Optimized QT clustering algorithm with diameter cache that:
-    1. Uses a filtered distance matrix with only points within threshold
-    2. Keeps track of neighboring points for each point
-    3. Uses diameter cache to optimize diameter calculations 
-    4. Skips points that are the second element in a closest pair
-    5. Has an optional limit on cluster size
+    Optimized QT clustering algorithm with common centers optimization that:
+    1. Identifies "common centers" that would form identical clusters
+    2. Only keeps one representative center from each set of common centers
+    3. Only recalculates clusters for groups whose centers are affected by best cluster selection
     """
-    print("Starting optimized QT clustering algorithm with diameter cache...")
+    print("Starting optimized QT clustering algorithm with common centers...")
     
-    # Generate all possible candidate clusters using diameter cache
-    candidate_clusters = generate_all_candidate_clusters_with_diameter_cache(
+    # Generate all possible candidate clusters and identify common centers
+    candidate_clusters, common_centers_map, center_to_cluster_map = generate_all_candidate_clusters_with_common_centers(
         point_data, 
         distance_matrix, 
         threshold,
@@ -390,6 +532,18 @@ def optimized_qt_clustering_with_diameter_cache(point_data, distance_matrix, thr
         closest_pairs,
         max_points_per_cluster
     )
+    
+    # Initialize the active representatives for each common center group
+    active_common_center_reps = {}
+    for center_idx, group_id in common_centers_map.items():
+        if group_id not in active_common_center_reps:
+            active_common_center_reps[group_id] = center_idx
+    
+    # Count unique clusters after common centers optimization
+    unique_clusters_count = len(candidate_clusters)
+    unique_common_center_groups = len(set(common_centers_map.values()))
+    
+    print(f"After common centers optimization: {unique_clusters_count} clusters ({unique_common_center_groups} unique common center groups)")
     
     # Keep track of used points and final clusters
     used_points = set()
@@ -421,21 +575,29 @@ def optimized_qt_clustering_with_diameter_cache(point_data, distance_matrix, thr
             first_three = [point_data[idx][0] for idx in best[:3]]
             print(f"- Selected best cluster with {len(best)} points: {first_three}... and {len(best)-3} more")
         
+        # Count common center groups affected by this cluster
+        affected_groups_count = len(set(common_centers_map.get(point, -1) for point in best if point in common_centers_map))
+        print(f"- Affected common center groups: {affected_groups_count}")
+        
         # Store current used points count
         prev_used_count = len(used_points)
         
-        # Update the candidate clusters with available points
-        candidate_clusters = update_candidate_clusters_with_diameter_cache(
+        # Update the candidate clusters with available points and common centers optimization
+        candidate_clusters, active_common_center_reps = update_candidate_clusters_with_common_centers(
             candidate_clusters,
             best,
             distance_matrix,
             threshold,
             used_points,
-            point_neighbors
+            point_neighbors,
+            common_centers_map,
+            center_to_cluster_map,
+            active_common_center_reps
         )
         
         print(f"- Added {len(used_points) - prev_used_count} new points to used points")
         print(f"- Regenerated {len(candidate_clusters)} candidate clusters")
+        print(f"- Active common center representatives: {len(active_common_center_reps)}")
         print(f"- Iteration completed in {time.time() - iter_start:.2f} seconds")
     
     # Add any remaining points as single-point clusters
@@ -455,7 +617,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2:
         infile = sys.argv[1]
     else:
-        infile = "data/point1000.lst"
+        infile = "data/point5000.lst"
     
     # Get max_points_per_cluster from command line if provided
     max_points_per_cluster = None
@@ -475,20 +637,13 @@ if __name__ == "__main__":
     # Calculate all distances to find maximum distance
     print("Finding maximum distance for threshold calculation...")
     max_distance = 0
-    
-    # For efficiency, only sample a subset of points for max distance calculation
-    # if the dataset is large
-    sample_size = min(len(point_data), 1000)
-    if sample_size < len(point_data):
-        print(f"Using a sample of {sample_size} points to estimate maximum distance")
-        
-    sample_indices = list(range(sample_size))
-    
-    for i in range(sample_size):
-        for j in range(i + 1, sample_size):
+
+    # Calculate max distance using all points in the dataset
+    for i in range(len(point_data)):
+        for j in range(i + 1, len(point_data)):
             dist = euclidean_dist(point_data[i], point_data[j])
             max_distance = max(max_distance, dist)
-    
+
     # Set quality threshold to 30% of maximum distance
     quality_threshold = 0.3 * max_distance
     print(f"Maximum distance: {max_distance}")
@@ -503,9 +658,9 @@ if __name__ == "__main__":
     preprocessing_time = time.time() - start_time
     print(f"Preprocessing completed in {preprocessing_time:.2f} seconds")
     
-    # Run the optimized QT clustering algorithm with diameter cache and closest pairs optimization
+    # Run the optimized QT clustering algorithm with common centers optimization
     clustering_start_time = time.time()
-    clusters = optimized_qt_clustering_with_diameter_cache(
+    clusters = optimized_qt_clustering_with_common_centers(
         point_data, 
         distance_matrix, 
         quality_threshold,
