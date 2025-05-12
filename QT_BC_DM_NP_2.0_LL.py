@@ -541,3 +541,9 @@ if __name__ == "__main__":
     
     total_time = time.time() - start_time
     print(f"\nTotal execution time: {total_time:.2f} seconds")
+
+
+for cluster in clusters:
+    print(cluster)
+    for point in cluster:
+        print(f"Point{point}")
